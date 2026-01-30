@@ -118,6 +118,64 @@
               chmod +x $out/bin/$name
             '';
           };
+
+        # Build a Janet image (.jimage) file with dependencies available
+        mkJanetImage = { name, src, entry, version ? null, buildInputs ? [ ]
+          , extraDeps ? [ ] }:
+          with final;
+          let
+            deps = (import (pkgs.runCommandLocal "run-janet-nix-image" {
+              inherit src;
+              buildInputs = [ janet-nix ];
+            } ''
+              if [ -f "$src/lockfile.jdn" ]; then
+                cp $src/lockfile.jdn .
+                janet-nix > $out
+              else
+                echo "[]" > $out
+              fi
+            ''));
+            sources = (builtins.map builtins.fetchGit (deps ++ extraDeps));
+          in stdenv.mkDerivation {
+            inherit name version src entry sources;
+
+            buildInputs = [ janet jpm ] ++ buildInputs;
+
+            buildPhase = ''
+              # localize jpm dependency paths
+              export JANET_PATH="$PWD/.jpm"
+              export JANET_TREE="$JANET_PATH/jpm_tree"
+              export JANET_LIBPATH="${pkgs.janet}/lib"
+              export JANET_HEADERPATH="${pkgs.janet}/include/janet"
+              export JANET_BUILDPATH="$JANET_PATH/build"
+              export PATH="$PATH:$JANET_TREE/bin"
+              mkdir -p "$JANET_TREE"
+              mkdir -p "$JANET_BUILDPATH"
+              mkdir -p "$PWD/.pkgs"
+
+              # fetch packages from the lockfile, mount repos
+              for source in $sources; do
+                cp -r "$source" "$PWD/.pkgs"
+              done
+              chmod +w -R "$PWD/.pkgs"
+
+              # install each package
+              for source in "$PWD/.pkgs/"*; do
+                pushd "$source"
+                jpm install
+                popd
+              done
+
+              jpm build
+
+              janet -m "$JANET_TREE/lib" -c "$entry" "${name}.jimage"
+            '';
+
+            installPhase = ''
+              mkdir -p $out
+              mv "${name}.jimage" $out/
+            '';
+          };
       };
 
       templates = {
@@ -134,6 +192,7 @@
       packages = forAllSystems (system: {
         janet-nix = nixpkgsFor.${system}.janet-nix;
         mkJanet = nixpkgsFor.${system}.mkJanet;
+        mkJanetImage = nixpkgsFor.${system}.mkJanetImage;
       });
 
       defaultPackage =
